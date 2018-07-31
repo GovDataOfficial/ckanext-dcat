@@ -1,5 +1,6 @@
 from __future__ import division
 import math
+from ast import literal_eval
 
 from pylons import config
 from dateutil.parser import parse as dateutil_parse
@@ -116,6 +117,12 @@ def _search_ckan_datasets(context, data_dict):
     if modified_since:
         search_data_dict['fq_list'].append(
             'metadata_modified:[{0} TO NOW]'.format(modified_since))
+
+    part = data_dict.get('part')
+    part_filter = literal_eval(config.get('ckanext.dcat.part.filter'))
+    part = part_filter.get(part, None)
+    if part:
+        search_data_dict['fq_list'].append(part)
 
     query = toolkit.get_action('package_search')(context, search_data_dict)
 

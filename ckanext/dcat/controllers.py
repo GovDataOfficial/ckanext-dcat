@@ -39,6 +39,7 @@ class DCATController(BaseController):
         data_dict = {
             'page': toolkit.request.params.get('page'),
             'modified_since': toolkit.request.params.get('modified_since'),
+            'part': toolkit.request.params.get('part'),
             'format': _format,
             'profiles': _profiles,
         }
