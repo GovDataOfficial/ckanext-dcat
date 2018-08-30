@@ -119,11 +119,14 @@ def _search_ckan_datasets(context, data_dict):
             'metadata_modified:[{0} TO NOW]'.format(modified_since))
 
     part = data_dict.get('part')
-    part_filter = literal_eval(config.get('ckanext.dcat.part.filter'))
-    part = part_filter.get(part, None)
     if part:
-        search_data_dict['fq_list'].append(part)
-
+        try:
+            part_filters = literal_eval(config.get('ckanext.dcat.part.filters'))
+            part_filter = part_filters.get(part)
+            if part_filter:
+                search_data_dict['fq_list'].append(part_filter)
+        except ValueError:
+            pass
     query = toolkit.get_action('package_search')(context, search_data_dict)
 
     return query
