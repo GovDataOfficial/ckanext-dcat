@@ -1,15 +1,35 @@
 import json
 
+from ckan import model
 from ckan.plugins import toolkit
 
 if toolkit.check_ckan_version(min_version='2.1'):
     BaseController = toolkit.BaseController
 else:
     from ckan.lib.base import BaseController
-from ckan.controllers.package import PackageController
-from ckan.controllers.home import HomeController
+
+if toolkit.check_ckan_version(max_version='2.8.99'):
+    from ckan.controllers.package import PackageController
+    from ckan.controllers.home import HomeController
+    read_endpoint = PackageController().read
+    index_endpoint = HomeController().index
+else:
+    from ckan.views.home import index as index_endpoint
+    from ckan.views.dataset import read as read_endpoint
 
 from ckanext.dcat.utils import CONTENT_TYPES, parse_accept_header
+from ckanext.dcat.processors import RDFProfileException
+
+
+def _get_package_type(id):
+    """
+    Given the id of a package this method will return the type of the
+    package, or 'dataset' if no type is currently set
+    """
+    pkg = model.Package.get(id)
+    if pkg:
+        return pkg.type or u'dataset'
+    return None
 
 
 def check_access_header():
@@ -30,7 +50,7 @@ class DCATController(BaseController):
             _format = check_access_header()
 
         if not _format:
-            return HomeController().index()
+            return index_endpoint()
 
         _profiles = toolkit.request.params.get('profiles')
         if _profiles:
@@ -40,6 +60,8 @@ class DCATController(BaseController):
             'page': toolkit.request.params.get('page'),
             'modified_since': toolkit.request.params.get('modified_since'),
             'part': toolkit.request.params.get('part'),
+            'q': toolkit.request.params.get('q'),
+            'fq': toolkit.request.params.get('fq'),
             'format': _format,
             'profiles': _profiles,
         }
@@ -48,7 +70,7 @@ class DCATController(BaseController):
             {'Content-type': CONTENT_TYPES[_format]})
         try:
             return toolkit.get_action('dcat_catalog_show')({}, data_dict)
-        except toolkit.ValidationError, e:
+        except (toolkit.ValidationError, RDFProfileException) as e:
             toolkit.abort(409, str(e))
 
     def read_dataset(self, _id, _format=None):
@@ -57,8 +79,11 @@ class DCATController(BaseController):
             _format = check_access_header()
 
         if not _format:
-            return PackageController().read(_id)
-        
+            if toolkit.check_ckan_version(max_version='2.8.99'):
+                return read_endpoint(_id)
+            else:
+                return read_endpoint(_get_package_type(_id), _id)
+
         _profiles = toolkit.request.params.get('profiles')
         if _profiles:
             _profiles = _profiles.split(',')
@@ -71,6 +96,8 @@ class DCATController(BaseController):
                 'format': _format, 'profiles': _profiles})
         except toolkit.ObjectNotFound:
             toolkit.abort(404)
+        except (toolkit.ValidationError, RDFProfileException) as e:
+            toolkit.abort(409, str(e))
 
         return result
 

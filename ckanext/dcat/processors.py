@@ -67,7 +67,7 @@ class RDFProcessor(object):
                 config.get(COMPAT_MODE_CONFIG_OPTION, False))
         self.compatibility_mode = compatibility_mode
 
-        self.g = rdflib.Graph()
+        self.g = rdflib.ConjunctiveGraph()
 
     def _load_profiles(self, profile_names):
         '''
@@ -438,6 +438,14 @@ Operation mode.
     contents = args.file.read()
 
     config.update({DCAT_EXPOSE_SUBCATALOGS: args.subcatalogs})
+
+    # Workaround until the core translation function defaults to the Flask one
+    from paste.registry import Registry
+    from ckan.lib.cli import MockTranslator
+    registry = Registry()
+    registry.prepare()
+    from pylons import translator
+    registry.register(translator, MockTranslator())
 
     if args.mode == 'produce':
         serializer = RDFSerializer(profiles=args.profile,

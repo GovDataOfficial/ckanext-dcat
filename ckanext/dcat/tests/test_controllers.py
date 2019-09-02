@@ -7,8 +7,6 @@ from six.moves import xrange
 from ckan import plugins as p
 from ckan.lib.helpers import url_for
 
-from ckantoolkit import config
-
 from rdflib import Graph
 
 from ckantoolkit.tests import helpers, factories
@@ -17,11 +15,14 @@ from ckanext.dcat.processors import RDFParser
 from ckanext.dcat.profiles import RDF, DCAT
 from ckanext.dcat.processors import HYDRA
 
+from ckanext.dcat.tests import DCATFunctionalTestBase
+
 eq_ = nose.tools.eq_
 assert_true = nose.tools.assert_true
+assert_in = nose.tools.assert_in
 
 
-class TestEndpoints(helpers.FunctionalTestBase):
+class TestEndpoints(DCATFunctionalTestBase):
 
     def setup(self):
         super(TestEndpoints, self).setup()
@@ -42,7 +43,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='rdf')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='rdf')
 
         app = self._get_test_app()
 
@@ -72,7 +73,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='xml')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='xml')
 
         app = self._get_test_app()
 
@@ -102,7 +103,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='ttl')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='ttl')
 
         app = self._get_test_app()
 
@@ -132,7 +133,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='n3')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='n3')
 
         app = self._get_test_app()
 
@@ -162,7 +163,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='jsonld')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='jsonld')
 
         app = self._get_test_app()
 
@@ -192,7 +193,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
 
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='jsonld', profiles='schemaorg')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='jsonld', profiles='schemaorg')
 
         app = self._get_test_app()
 
@@ -204,6 +205,20 @@ class TestEndpoints(helpers.FunctionalTestBase):
 
         assert '"@type": "schema:Dataset"' in content
         assert '"schema:description": "%s"' % dataset['notes'] in content
+
+    def test_dataset_profiles_not_found(self):
+
+        dataset = factories.Dataset(
+            notes='Test dataset'
+        )
+
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='jsonld', profiles='nope')
+
+        app = self._get_test_app()
+
+        response = app.get(url, status=409)
+
+        assert 'Unknown RDF profiles: nope' in response.body
 
     def test_dataset_not_found(self):
         import uuid
@@ -220,7 +235,7 @@ class TestEndpoints(helpers.FunctionalTestBase):
             notes='Test dataset'
         )
         # without the route, url_for returns the given parameters
-        url = url_for('dcat_dataset', _id=dataset['id'], _format='xml')
+        url = url_for('dcat_dataset', _id=dataset['name'], _format='xml')
         assert not url.startswith('/')
         assert url.startswith('dcat_dataset')
 
@@ -321,6 +336,57 @@ class TestEndpoints(helpers.FunctionalTestBase):
 
         app.get(url, status=409)
 
+    def test_catalog_q_search(self):
+
+        dataset1 = factories.Dataset(title='First dataset')
+        dataset2 = factories.Dataset(title='Second dataset')
+
+        url = url_for('dcat_catalog',
+                      _format='ttl',
+                      q='First')
+
+        app = self._get_test_app()
+        response = app.get(url)
+        content = response.body
+        p = RDFParser()
+        p.parse(content, _format='turtle')
+
+        dcat_datasets = [d for d in p.datasets()]
+        eq_(len(dcat_datasets), 1)
+        eq_(dcat_datasets[0]['title'], dataset1['title'])
+
+    def test_catalog_fq_filter(self):
+        dataset1 = factories.Dataset(
+            title='First dataset',
+            tags=[
+                {'name': 'economy'},
+                {'name': 'statistics'}
+            ]
+        )
+        dataset2 = factories.Dataset(
+            title='Second dataset',
+            tags=[{'name': 'economy'}]
+        )
+        dataset3 = factories.Dataset(
+            title='Third dataset',
+            tags=[{'name': 'statistics'}]
+        )
+
+        url = url_for('dcat_catalog',
+                      _format='ttl',
+                      fq='tags:economy')
+
+        app = self._get_test_app()
+        response = app.get(url)
+        content = response.body
+        p = RDFParser()
+        p.parse(content, _format='turtle')
+
+        dcat_datasets = [d for d in p.datasets()]
+        eq_(len(dcat_datasets), 2)
+        assert_in(dcat_datasets[0]['title'], [dataset1['title'], dataset2['title']])
+        assert_in(dcat_datasets[1]['title'], [dataset1['title'], dataset2['title']])
+
     @helpers.change_config('ckanext.dcat.datasets_per_page', 10)
     def test_catalog_pagination(self):
 
@@ -355,6 +421,42 @@ class TestEndpoints(helpers.FunctionalTestBase):
         eq_(self._object_value(g, pagination, HYDRA.lastPage),
             url_for('dcat_catalog', _format='rdf', page=2, host='test.ckan.net'))
 
+    @helpers.change_config('ckanext.dcat.datasets_per_page', 10)
+    def test_catalog_pagination_parameters(self):
+
+        for i in xrange(12):
+            factories.Dataset()
+
+        app = self._get_test_app()
+
+        url = url_for('dcat_catalog', _format='rdf', modified_since='2018-03-22', extra_param='test')
+
+        response = app.get(url)
+
+        content = response.body
+
+        g = Graph()
+        g.parse(data=content, format='xml')
+
+
+        pagination = [o for o in g.subjects(RDF.type, HYDRA.PagedCollection)][0]
+
+        eq_(self._object_value(g, pagination, HYDRA.itemsPerPage), '10')
+
+        eq_(self._object_value(g, pagination, HYDRA.firstPage),
+            url_for('dcat_catalog', _format='rdf', page=1, host='test.ckan.net', modified_since='2018-03-22'))
+
+    def test_catalog_profiles_not_found(self):
+
+        url = url_for('dcat_catalog', _format='jsonld', profiles='nope')
+
+        app = self._get_test_app()
+
+        response = app.get(url, status=409)
+
+        assert 'Unknown RDF profiles: nope' in response.body
+
+
     @helpers.change_config('ckanext.dcat.enable_rdf_endpoints', False)
     def test_catalog_endpoint_disabled(self):
         p.unload('dcat')
@@ -365,21 +467,16 @@ class TestEndpoints(helpers.FunctionalTestBase):
         assert url.startswith('dcat_catalog')
 
 
-class TestAcceptHeader(helpers.FunctionalTestBase):
+class TestAcceptHeader(DCATFunctionalTestBase):
     '''
     ckanext.dcat.enable_content_negotiation is enabled on test.ini
     '''
-
-    @classmethod
-    def teardown_class(cls):
-        super(TestAcceptHeader, cls).teardown_class()
-        helpers.reset_db()
 
     def test_dataset_basic(self):
 
         dataset = factories.Dataset()
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         headers = {'Accept': 'application/ld+json'}
 
@@ -393,7 +490,7 @@ class TestAcceptHeader(helpers.FunctionalTestBase):
 
         dataset = factories.Dataset()
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         headers = {'Accept': 'text/csv; q=1.0, text/turtle; q=0.6, application/ld+json; q=0.3'}
 
@@ -407,7 +504,7 @@ class TestAcceptHeader(helpers.FunctionalTestBase):
 
         dataset = factories.Dataset()
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         headers = {'Accept': 'image/gif'}
 
@@ -421,7 +518,7 @@ class TestAcceptHeader(helpers.FunctionalTestBase):
 
         dataset = factories.Dataset()
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         app = self._get_test_app()
 
@@ -476,7 +573,7 @@ class TestAcceptHeader(helpers.FunctionalTestBase):
         eq_(response.headers['Content-Type'], 'text/html; charset=utf-8')
 
 
-class TestTranslations(helpers.FunctionalTestBase):
+class TestTranslations(DCATFunctionalTestBase):
 
     @classmethod
     def setup_class(cls):
@@ -496,7 +593,7 @@ class TestTranslations(helpers.FunctionalTestBase):
             {'key': 'version_notes', 'value': 'bla'}
         ])
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         app = self._get_test_app()
 
@@ -510,7 +607,7 @@ class TestTranslations(helpers.FunctionalTestBase):
             {'key': 'version_notes', 'value': 'bla'}
         ])
 
-        url = url_for('dataset_read', id=dataset['id'], locale='ca')
+        url = url_for('dataset_read', id=dataset['name'], locale='ca')
 
         app = self._get_test_app()
 
@@ -524,7 +621,7 @@ class TestTranslations(helpers.FunctionalTestBase):
             {'key': 'version_notes', 'value': 'bla'}
         ])
 
-        url = url_for('dataset_read', id=dataset['id'], locale='ca')
+        url = url_for('dataset_read', id=dataset['name'], locale='ca')
 
         app = self._get_test_app()
 
@@ -539,7 +636,7 @@ class TestTranslations(helpers.FunctionalTestBase):
             {'key': 'version_notes', 'value': 'bla'}
         ])
 
-        url = url_for('dataset_read', id=dataset['id'], locale='ca')
+        url = url_for('dataset_read', id=dataset['name'], locale='ca')
 
         app = self._get_test_app()
 
@@ -550,12 +647,7 @@ class TestTranslations(helpers.FunctionalTestBase):
         assert 'version_notes' in response.body
 
 
-class TestStructuredData(helpers.FunctionalTestBase):
-
-    @classmethod
-    def teardown_class(cls):
-        super(TestStructuredData, cls).teardown_class()
-        helpers.reset_db()
+class TestStructuredData(DCATFunctionalTestBase):
 
     def test_structured_data_generated(self):
 
@@ -563,7 +655,7 @@ class TestStructuredData(helpers.FunctionalTestBase):
             notes='test description'
         )
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         app = self._get_test_app()
 
@@ -572,7 +664,6 @@ class TestStructuredData(helpers.FunctionalTestBase):
         assert '<script type="application/ld+json">' in response.body
         assert '"schema:description": "test description"' in response.body
 
-
     def test_structured_data_not_generated(self):
         p.unload('structured_data')
 
@@ -580,7 +671,7 @@ class TestStructuredData(helpers.FunctionalTestBase):
             notes='test description'
         )
 
-        url = url_for('dataset_read', id=dataset['id'])
+        url = url_for('dataset_read', id=dataset['name'])
 
         app = self._get_test_app()
 

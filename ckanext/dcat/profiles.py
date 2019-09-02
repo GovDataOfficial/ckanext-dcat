@@ -1,6 +1,8 @@
 import datetime
 import json
 
+from urllib import quote
+
 from dateutil.parser import parse as parse_date
 
 from ckantoolkit import config
@@ -14,6 +16,7 @@ from geomet import wkt, InvalidGeoJSONException
 from ckan.model.license import LicenseRegister
 from ckan.plugins import toolkit
 from ckan.lib.munge import munge_tag
+from ckan.lib.helpers import url_for
 
 from ckanext.dcat.utils import resource_uri, publisher_uri_from_dataset_dict, DCAT_EXPOSE_SUBCATALOGS, DCAT_CLEAN_TAGS
 
@@ -43,7 +46,56 @@ namespaces = {
     'locn': LOCN,
     'gsp': GSP,
     'owl': OWL,
+    'spdx': SPDX,
 }
+
+PREFIX_MAILTO = u'mailto:'
+
+class URIRefOrLiteral(object):
+    '''Helper which creates an URIRef if the value appears to be an http URL,
+    or a Literal otherwise. URIRefs are also cleaned using CleanedURIRef.
+
+    Like CleanedURIRef, this is a factory class.
+    '''
+    def __new__(cls, value):
+        stripped_value = value.strip()
+        if (isinstance(value, basestring) and (stripped_value.startswith("http://")
+                                               or stripped_value.startswith("https://"))):
+            uri_obj = CleanedURIRef(value)
+            # although all invalid chars checked by rdflib should have been quoted, try to serialize
+            # the object. If it breaks, use Literal instead.
+            try:
+                uri_obj.n3()
+            except Exception:
+                return Literal(value)
+            # URI is fine, return the object
+            return uri_obj
+        else:
+            return Literal(value)
+
+
+class CleanedURIRef(object):
+    '''Performs some basic URL encoding on value before creating an URIRef object.
+
+    This is a factory for URIRef objects, which allows usage as type in graph.add()
+    without affecting the resulting node types. That is,
+    g.add(..., URIRef) and g.add(..., CleanedURIRef) will result in the exact same node type.
+    '''
+    @staticmethod
+    def _careful_quote(value):
+        # only encode this limited subset of characters to avoid more complex URL parsing
+        # (e.g. valid ? in query string vs. ? as value).
+        # can be applied multiple times, as encoded %xy is left untouched. Therefore, no
+        # unquote is necessary beforehand.
+        quotechars = ' !"$\'()*,;<>[]{|}\\^`'
+        for c in quotechars:
+            value = value.replace(c, quote(c))
+        return value
+
+    def __new__(cls, value):
+        if isinstance(value, basestring):
+            value = CleanedURIRef._careful_quote(value.strip())
+        return URIRef(value)
 
 
 class RDFProfile(object):
@@ -92,6 +144,18 @@ class RDFProfile(object):
         for distribution in self.g.objects(dataset, DCAT.distribution):
             yield distribution
 
+    def _keywords(self, dataset_ref):
+        '''
+        Returns all DCAT keywords on a particular dataset
+        '''
+        keywords = self._object_value_list(dataset_ref, DCAT.keyword) or []
+        # Split keywords with commas
+        keywords_with_commas = [k for k in keywords if ',' in k]
+        for keyword in keywords_with_commas:
+            keywords.remove(keyword)
+            keywords.extend([k.strip() for k in keyword.split(',')])
+        return keywords
+
     def _object(self, subject, predicate):
         '''
         Helper for returning the first object for this subject and predicate
@@ -112,9 +176,18 @@ class RDFProfile(object):
 
         If found, the unicode representation is returned, else an empty string
         '''
+        default_lang = config.get('ckan.locale_default', 'en')
+        fallback = ''
         for o in self.g.objects(subject, predicate):
-            return unicode(o)
-        return ''
+            if isinstance(o, Literal):
+                if o.language and o.language == default_lang:
+                    return unicode(o)
+                # Use first object as fallback if no object with the default language is available
+                elif fallback == '':
+                    fallback = unicode(o)
+            else:
+                return unicode(o)
+        return fallback
 
     def _object_value_int(self, subject, predicate):
         '''
@@ -128,7 +201,7 @@ class RDFProfile(object):
         object_value = self._object_value(subject, predicate)
         if object_value:
             try:
-                return int(object_value)
+                return int(float(object_value))
             except ValueError:
                 pass
         return None
@@ -255,7 +328,9 @@ class RDFProfile(object):
 
             contact['name'] = self._object_value(agent, VCARD.fn)
 
-            contact['email'] = self._object_value(agent, VCARD.hasEmail)
+            contact['email'] = self._without_mailto(
+                self._object_value(agent, VCARD.hasEmail)
+            )
 
         return contact
 
@@ -363,11 +438,13 @@ class RDFProfile(object):
             <dct:format>
                 <dct:IMT rdf:value="text/html" rdfs:label="HTML"/>
             </dct:format>
+        4. value of dct:format if it is an URIRef and appears to be an IANA type
 
         Values for the label will be checked in the following order:
 
         1. literal value of dct:format if it not contains a '/' character
         2. label of dct:format if it is an instance of dct:IMT (see above)
+        3. value of dct:format if it is an URIRef and doesn't look like an IANA type
 
         If `normalize_ckan_format` is True and using CKAN>=2.3, the label will
         be tried to match against the standard list of formats that is included
@@ -397,6 +474,14 @@ class RDFProfile(object):
                 if not imt:
                     imt = unicode(self.g.value(_format, default=None))
                 label = unicode(self.g.label(_format, default=None))
+            elif isinstance(_format, URIRef):
+                # If the URIRef does not reference a BNode, it could reference an IANA type.
+                # Otherwise, use it as label.
+                format_uri = unicode(_format)
+                if 'iana.org/assignments/media-types' in format_uri and not imt:
+                    imt = format_uri
+                else:
+                    label = format_uri
 
         if ((imt or label) and normalize_ckan_format and
                 toolkit.check_ckan_version(min_version='2.3')):
@@ -471,15 +556,19 @@ class RDFProfile(object):
                               fallbacks=None,
                               list_value=False,
                               date_value=False,
-                              _type=Literal):
+                              _type=Literal,
+                              value_modifier=None):
         '''
         Adds a new triple to the graph with the provided parameters
 
         The subject and predicate of the triple are passed as the relevant
-        RDFLib objects (URIRef or BNode). The object is always a literal value,
-        which is extracted from the dict using the provided key (see
-        `_get_dict_value`). If the value for the key is not found, then
+        RDFLib objects (URIRef or BNode). As default, the object is a
+        literal value, which is extracted from the dict using the provided key
+        (see `_get_dict_value`). If the value for the key is not found, then
         additional fallback keys are checked.
+        Using `value_modifier`, a function taking the extracted value and
+        returning a modified value can be passed.
+        If a value was found, the modifier is applied before adding the value.
 
         If `list_value` or `date_value` are True, then the value is treated as
         a list or a date respectively (see `_add_list_triple` and
@@ -492,12 +581,19 @@ class RDFProfile(object):
                 if value:
                     break
 
+        # if a modifying function was given, apply it to the value
+        if value and callable(value_modifier):
+            value = value_modifier(value)
+
         if value and list_value:
             self._add_list_triple(subject, predicate, value, _type)
         elif value and date_value:
             self._add_date_triple(subject, predicate, value, _type)
         elif value:
             # Normal text value
+            # ensure URIRef items are preprocessed (space removal/url encoding)
+            if _type == URIRef:
+                _type = CleanedURIRef
             self.g.add((subject, predicate, _type(value)))
 
     def _add_list_triple(self, subject, predicate, value, _type=Literal):
@@ -527,6 +623,9 @@ class RDFProfile(object):
                     items = [value]
 
         for item in items:
+            # ensure URIRef items are preprocessed (space removal/url encoding)
+            if _type == URIRef:
+                _type = CleanedURIRef
             self.g.add((subject, predicate, _type(item)))
 
     def _add_date_triple(self, subject, predicate, value, _type=Literal):
@@ -560,8 +659,7 @@ class RDFProfile(object):
         found.
         '''
         context = {
-            'user': toolkit.get_action('get_site_user')(
-                {'ignore_auth': True})['name']
+            'ignore_auth': True
         }
         result = toolkit.get_action('package_search')(context, {
             'sort': 'metadata_modified desc',
@@ -571,12 +669,31 @@ class RDFProfile(object):
             return result['results'][0]['metadata_modified']
         return None
 
+    def _add_mailto(self, mail_addr):
+        '''
+        Ensures that the mail address has an URIRef-compatible mailto: prefix.
+        Can be used as modifier function for `_add_triple_from_dict`.
+        '''
+        if mail_addr:
+            return PREFIX_MAILTO + self._without_mailto(mail_addr)
+        else:
+            return mail_addr
+
+    def _without_mailto(self, mail_addr):
+        '''
+        Ensures that the mail address string has no mailto: prefix.
+        '''
+        if mail_addr:
+            return unicode(mail_addr).replace(PREFIX_MAILTO, u'')
+        else:
+            return mail_addr
+
     def _get_source_catalog(self, dataset_ref):
         '''
-        Returns Catalog reference that is source for this dataset. 
+        Returns Catalog reference that is source for this dataset.
 
-        Catalog referenced in dct:hasPart is returned, 
-        if dataset is linked there, otherwise main catalog 
+        Catalog referenced in dct:hasPart is returned,
+        if dataset is linked there, otherwise main catalog
         will be returned.
 
         This will not be used if ckanext.dcat.expose_subcatalogs
@@ -594,7 +711,7 @@ class RDFProfile(object):
         if catalogs:
             return catalogs.pop()
         return root
-    
+
     def _get_root_catalog_ref(self):
         roots = list(self.g.subjects(DCT.hasPart))
         if not roots:
@@ -698,16 +815,9 @@ class EuropeanDCATAPProfile(RDFProfile):
                 dataset_dict['version'] = value
 
         # Tags
-        keywords = self._object_value_list(dataset_ref, DCAT.keyword) or []
-        # Split keywords with commas
-        keywords_with_commas = [k for k in keywords if ',' in k]
-        for keyword in keywords_with_commas:
-            keywords.remove(keyword)
-            keywords.extend([k.strip() for k in keyword.split(',')])
-
         # replace munge_tag to noop if there's no need to clean tags
         do_clean = toolkit.asbool(config.get(DCAT_CLEAN_TAGS, False))
-        tags_val = [munge_tag(tag) if do_clean else tag for tag in keywords]
+        tags_val = [munge_tag(tag) if do_clean else tag for tag in self._keywords(dataset_ref)]
         tags = [{'name': tag} for tag in tags_val]
         dataset_dict['tags'] = tags
 
@@ -810,6 +920,7 @@ class EuropeanDCATAPProfile(RDFProfile):
             for key, predicate in (
                     ('name', DCT.title),
                     ('description', DCT.description),
+                    ('access_url', DCAT.accessURL),
                     ('download_url', DCAT.downloadURL),
                     ('issued', DCT.issued),
                     ('modified', DCT.modified),
@@ -822,9 +933,9 @@ class EuropeanDCATAPProfile(RDFProfile):
                     resource_dict[key] = value
 
             resource_dict['url'] = (self._object_value(distribution,
-                                                       DCAT.accessURL) or
+                                                       DCAT.downloadURL) or
                                     self._object_value(distribution,
-                                                       DCAT.downloadURL))
+                                                       DCAT.accessURL))
             #  Lists
             for key, predicate in (
                     ('language', DCT.language),
@@ -903,7 +1014,7 @@ class EuropeanDCATAPProfile(RDFProfile):
             ('identifier', DCT.identifier, ['guid', 'id'], Literal),
             ('version', OWL.versionInfo, ['dcat_version'], Literal),
             ('version_notes', ADMS.versionNotes, None, Literal),
-            ('frequency', DCT.accrualPeriodicity, None, Literal),
+            ('frequency', DCT.accrualPeriodicity, None, URIRefOrLiteral),
             ('access_rights', DCT.accessRights, None, Literal),
             ('dcat_type', DCT.type, None, Literal),
             ('provenance', DCT.provenance, None, Literal),
@@ -923,14 +1034,14 @@ class EuropeanDCATAPProfile(RDFProfile):
 
         #  Lists
         items = [
-            ('language', DCT.language, None, Literal),
+            ('language', DCT.language, None, URIRefOrLiteral),
             ('theme', DCAT.theme, None, URIRef),
             ('conforms_to', DCT.conformsTo, None, Literal),
             ('alternate_identifier', ADMS.identifier, None, Literal),
-            ('documentation', FOAF.page, None, Literal),
-            ('related_resource', DCT.relation, None, Literal),
-            ('has_version', DCT.hasVersion, None, Literal),
-            ('is_version_of', DCT.isVersionOf, None, Literal),
+            ('documentation', FOAF.page, None, URIRefOrLiteral),
+            ('related_resource', DCT.relation, None, URIRefOrLiteral),
+            ('has_version', DCT.hasVersion, None, URIRefOrLiteral),
+            ('is_version_of', DCT.isVersionOf, None, URIRefOrLiteral),
             ('source', DCT.source, None, Literal),
             ('sample', ADMS.sample, None, Literal),
         ]
@@ -949,20 +1060,24 @@ class EuropeanDCATAPProfile(RDFProfile):
 
             contact_uri = self._get_dataset_value(dataset_dict, 'contact_uri')
             if contact_uri:
-                contact_details = URIRef(contact_uri)
+                contact_details = CleanedURIRef(contact_uri)
             else:
                 contact_details = BNode()
 
             g.add((contact_details, RDF.type, VCARD.Organization))
             g.add((dataset_ref, DCAT.contactPoint, contact_details))
 
-            items = [
-                ('contact_name', VCARD.fn, ['maintainer', 'author'], Literal),
-                ('contact_email', VCARD.hasEmail, ['maintainer_email',
-                                                   'author_email'], Literal),
-            ]
-
-            self._add_triples_from_dict(dataset_dict, contact_details, items)
+            self._add_triple_from_dict(
+                dataset_dict, contact_details,
+                VCARD.fn, 'contact_name', ['maintainer', 'author']
+            )
+            # Add mail address as URIRef, and ensure it has a mailto: prefix
+            self._add_triple_from_dict(
+                dataset_dict, contact_details,
+                VCARD.hasEmail, 'contact_email', ['maintainer_email',
+                                                  'author_email'],
+                _type=URIRef, value_modifier=self._add_mailto
+            )
 
         # Publisher
         if any([
@@ -973,7 +1088,7 @@ class EuropeanDCATAPProfile(RDFProfile):
 
             publisher_uri = publisher_uri_from_dataset_dict(dataset_dict)
             if publisher_uri:
-                publisher_details = URIRef(publisher_uri)
+                publisher_details = CleanedURIRef(publisher_uri)
             else:
                 # No organization nor publisher_uri
                 publisher_details = BNode()
@@ -993,7 +1108,7 @@ class EuropeanDCATAPProfile(RDFProfile):
             items = [
                 ('publisher_email', FOAF.mbox, None, Literal),
                 ('publisher_url', FOAF.homepage, None, URIRef),
-                ('publisher_type', DCT.type, None, Literal),
+                ('publisher_type', DCT.type, None, URIRefOrLiteral),
             ]
 
             self._add_triples_from_dict(dataset_dict, publisher_details, items)
@@ -1018,7 +1133,7 @@ class EuropeanDCATAPProfile(RDFProfile):
 
         if spatial_uri or spatial_text or spatial_geom:
             if spatial_uri:
-                spatial_ref = URIRef(spatial_uri)
+                spatial_ref = CleanedURIRef(spatial_uri)
             else:
                 spatial_ref = BNode()
 
@@ -1046,7 +1161,7 @@ class EuropeanDCATAPProfile(RDFProfile):
         # Resources
         for resource_dict in dataset_dict.get('resources', []):
 
-            distribution = URIRef(resource_uri(resource_dict))
+            distribution = CleanedURIRef(resource_uri(resource_dict))
 
             g.add((dataset_ref, DCAT.distribution, distribution))
 
@@ -1056,41 +1171,57 @@ class EuropeanDCATAPProfile(RDFProfile):
             items = [
                 ('name', DCT.title, None, Literal),
                 ('description', DCT.description, None, Literal),
-                ('status', ADMS.status, None, Literal),
-                ('rights', DCT.rights, None, Literal),
-                ('license', DCT.license, None, Literal),
+                ('status', ADMS.status, None, URIRefOrLiteral),
+                ('rights', DCT.rights, None, URIRefOrLiteral),
+                ('license', DCT.license, None, URIRefOrLiteral),
+                ('access_url', DCAT.accessURL, None, URIRef),
+                ('download_url', DCAT.downloadURL, None, URIRef),
             ]
 
             self._add_triples_from_dict(resource_dict, distribution, items)
 
             #  Lists
             items = [
-                ('documentation', FOAF.page, None, Literal),
-                ('language', DCT.language, None, Literal),
+                ('documentation', FOAF.page, None, URIRefOrLiteral),
+                ('language', DCT.language, None, URIRefOrLiteral),
                 ('conforms_to', DCT.conformsTo, None, Literal),
             ]
             self._add_list_triples_from_dict(resource_dict, distribution, items)
 
             # Format
-            if '/' in resource_dict.get('format', ''):
+            mimetype = resource_dict.get('mimetype')
+            fmt = resource_dict.get('format')
+
+            # IANA media types (either URI or Literal) should be mapped as mediaType.
+            # In case format is available and mimetype is not set or identical to format,
+            # check which type is appropriate.
+            if fmt and (not mimetype or mimetype == fmt):
+                if ('iana.org/assignments/media-types' in fmt
+                        or not fmt.startswith('http') and '/' in fmt):
+                    # output format value as dcat:mediaType instead of dct:format
+                    mimetype = fmt
+                    fmt = None
+                else:
+                    # Use dct:format
+                    mimetype = None
+
+            if mimetype:
                 g.add((distribution, DCAT.mediaType,
-                       Literal(resource_dict['format'])))
-            else:
-                if resource_dict.get('format'):
-                    g.add((distribution, DCT['format'],
-                           Literal(resource_dict['format'])))
+                       URIRefOrLiteral(mimetype)))
 
-                if resource_dict.get('mimetype'):
-                    g.add((distribution, DCAT.mediaType,
-                           Literal(resource_dict['mimetype'])))
+            if fmt:
+                g.add((distribution, DCT['format'],
+                       URIRefOrLiteral(fmt)))
 
-            # URL
+
+            # URL fallback and old behavior
             url = resource_dict.get('url')
             download_url = resource_dict.get('download_url')
-            if download_url:
-                g.add((distribution, DCAT.downloadURL, URIRef(download_url)))
-            if (url and not download_url) or (url and url != download_url):
-                g.add((distribution, DCAT.accessURL, URIRef(url)))
+            access_url = resource_dict.get('access_url')
+            # Use url as fallback for access_url if access_url is not set and download_url is not equal
+            if url and not access_url:
+                if (not download_url) or (download_url and url != download_url):
+                  self._add_triple_from_dict(resource_dict, distribution, DCAT.accessURL, 'url', _type=URIRef)
 
             # Dates
             items = [
@@ -1112,17 +1243,15 @@ class EuropeanDCATAPProfile(RDFProfile):
             # Checksum
             if resource_dict.get('hash'):
                 checksum = BNode()
+                g.add((checksum, RDF.type, SPDX.Checksum))
                 g.add((checksum, SPDX.checksumValue,
                        Literal(resource_dict['hash'],
                                datatype=XSD.hexBinary)))
 
                 if resource_dict.get('hash_algorithm'):
-                    if resource_dict['hash_algorithm'].startswith('http'):
-                        g.add((checksum, SPDX.algorithm,
-                               URIRef(resource_dict['hash_algorithm'])))
-                    else:
-                        g.add((checksum, SPDX.algorithm,
-                               Literal(resource_dict['hash_algorithm'])))
+                    g.add((checksum, SPDX.algorithm,
+                           URIRefOrLiteral(resource_dict['hash_algorithm'])))
+
                 g.add((distribution, SPDX.checksum, checksum))
 
     def graph_from_catalog(self, catalog_dict, catalog_ref):
@@ -1139,7 +1268,7 @@ class EuropeanDCATAPProfile(RDFProfile):
             ('title', DCT.title, config.get('ckan.site_title'), Literal),
             ('description', DCT.description, config.get('ckan.site_description'), Literal),
             ('homepage', FOAF.homepage, config.get('ckan.site_url'), URIRef),
-            ('language', DCT.language, config.get('ckan.locale_default', 'en'), Literal),
+            ('language', DCT.language, config.get('ckan.locale_default', 'en'), URIRefOrLiteral),
         ]
         for item in items:
             key, predicate, fallback, _type = item
@@ -1180,6 +1309,12 @@ class SchemaOrgProfile(RDFProfile):
         # Basic fields
         self._basic_fields_graph(dataset_ref, dataset_dict)
 
+        # Catalog
+        self._catalog_graph(dataset_ref, dataset_dict)
+
+        # Groups
+        self._groups_graph(dataset_ref, dataset_dict)
+
         # Tags
         self._tags_graph(dataset_ref, dataset_dict)
 
@@ -1197,6 +1332,18 @@ class SchemaOrgProfile(RDFProfile):
 
         # Resources
         self._resources_graph(dataset_ref, dataset_dict)
+
+        # Additional fields
+        self.additional_fields(dataset_ref, dataset_dict)
+
+    def additional_fields(self, dataset_ref, dataset_dict):
+        '''
+        Adds any additional fields.
+
+        For a custom schema you should extend this class and
+        implement this method.
+        '''
+        pass
 
     def _add_date_triple(self, subject, predicate, value, _type=Literal):
         '''
@@ -1228,6 +1375,7 @@ class SchemaOrgProfile(RDFProfile):
             ('version', SCHEMA.version, ['dcat_version'], Literal),
             ('issued', SCHEMA.datePublished, ['metadata_created'], Literal),
             ('modified', SCHEMA.dateModified, ['metadata_modified'], Literal),
+            ('license', SCHEMA.license, ['license_url', 'license_title'], Literal),
         ]
         self._add_triples_from_dict(dataset_dict, dataset_ref, items)
 
@@ -1238,6 +1386,35 @@ class SchemaOrgProfile(RDFProfile):
 
         self._add_date_triples_from_dict(dataset_dict, dataset_ref, items)
 
+        # Dataset URL
+        dataset_url = url_for('dataset_read',
+                              id=dataset_dict['name'],
+                              qualified=True)
+        self.g.add((dataset_ref, SCHEMA.url, Literal(dataset_url)))
+
+    def _catalog_graph(self, dataset_ref, dataset_dict):
+        data_catalog = BNode()
+        self.g.add((dataset_ref, SCHEMA.includedInDataCatalog, data_catalog))
+        self.g.add((data_catalog, RDF.type, SCHEMA.DataCatalog))
+        self.g.add((data_catalog, SCHEMA.name, Literal(config.get('ckan.site_title'))))
+        self.g.add((data_catalog, SCHEMA.description, Literal(config.get('ckan.site_description'))))
+        self.g.add((data_catalog, SCHEMA.url, Literal(config.get('ckan.site_url'))))
+
+    def _groups_graph(self, dataset_ref, dataset_dict):
+        for group in dataset_dict.get('groups', []):
+            group_url = url_for(controller='group',
+                                action='read',
+                                id=group.get('id'),
+                                qualified=True)
+            about = BNode()
+
+            self.g.add((about, RDF.type, SCHEMA.Thing))
+
+            self.g.add((about, SCHEMA.name, Literal(group['name'])))
+            self.g.add((about, SCHEMA.url, Literal(group_url)))
+
+            self.g.add((dataset_ref, SCHEMA.about, about))
+
     def _tags_graph(self, dataset_ref, dataset_dict):
         for tag in dataset_dict.get('tags', []):
             self.g.add((dataset_ref, SCHEMA.keywords, Literal(tag['name'])))
@@ -1245,7 +1422,6 @@ class SchemaOrgProfile(RDFProfile):
     def _list_fields_graph(self, dataset_ref, dataset_dict):
         items = [
             ('language', SCHEMA.inLanguage, None, Literal),
-            ('theme', SCHEMA.about, None, URIRef),
         ]
         self._add_list_triples_from_dict(dataset_dict, dataset_ref, items)
 

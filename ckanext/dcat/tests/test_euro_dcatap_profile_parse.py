@@ -39,6 +39,43 @@ class BaseParseTest(object):
 
 class TestEuroDCATAPProfileParsing(BaseParseTest):
 
+    def _build_and_parse_format_mediatype_graph(self, format_item=None, mediatype_item=None):
+        """
+        Creates a minimal graph with a distribution having the specified dct:format and dcat:mediaType
+        nodes. At least one of those nodes has to be given.
+
+        After creating the graph, it is parsed using the euro_dcat_ap profile.
+
+        :param format_item:
+            Literal or URIRef object for dct:format. None if the node should be omitted.
+        :param mediatype_item:
+            Literal or URIRef object for dcat:mediaType. None if the node should be omitted.
+
+        :returns:
+            The parsed resource dict
+        """
+        g = Graph()
+
+        dataset = URIRef("http://example.org/datasets/1")
+        g.add((dataset, RDF.type, DCAT.Dataset))
+
+        distribution = URIRef("http://example.org/datasets/1/ds/1")
+        g.add((dataset, DCAT.distribution, distribution))
+        g.add((distribution, RDF.type, DCAT.Distribution))
+        if format_item:
+            g.add((distribution, DCT['format'], format_item))
+        if mediatype_item:
+            g.add((distribution, DCAT.mediaType, mediatype_item))
+        if format_item is None and mediatype_item is None:
+            raise AssertionError('At least one of format or mediaType is required!')
+
+        p = RDFParser(profiles=['euro_dcat_ap'])
+
+        p.g = g
+
+        dataset = [d for d in p.datasets()][0]
+        return dataset.get('resources')
+
     def test_dataset_all_fields(self):
 
         contents = self._get_file_contents('dataset.rdf')
@@ -91,7 +128,8 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
         eq_(_get_extra_value('publisher_url'), 'http://some.org')
         eq_(_get_extra_value('publisher_type'), 'http://purl.org/adms/publishertype/NonProfitOrganisation')
         eq_(_get_extra_value('contact_name'), 'Point of Contact')
-        eq_(_get_extra_value('contact_email'), 'mailto:contact@some.org')
+        # mailto gets removed for storage and is added again on output
+        eq_(_get_extra_value('contact_email'), 'contact@some.org')
         eq_(_get_extra_value('access_rights'), 'public')
         eq_(_get_extra_value('provenance'), 'Some statement about provenance')
         eq_(_get_extra_value('dcat_type'), 'test-type')
@@ -233,6 +271,7 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
         resource = datasets[0]['resources'][0]
 
         eq_(resource['url'], u'http://access.url.org')
+        eq_(resource['access_url'], u'http://access.url.org')
         assert 'download_url' not in resource
 
     def test_distribution_download_url(self):
@@ -256,6 +295,7 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
 
         eq_(resource['url'], u'http://download.url.org')
         eq_(resource['download_url'], u'http://download.url.org')
+        assert 'access_url' not in resource
 
     def test_distribution_both_access_and_download_url(self):
         g = Graph()
@@ -277,8 +317,9 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
 
         resource = datasets[0]['resources'][0]
 
-        eq_(resource['url'], u'http://access.url.org')
+        eq_(resource['url'], u'http://download.url.org')
         eq_(resource['download_url'], u'http://download.url.org')
+        eq_(resource['access_url'], u'http://access.url.org')
 
     def test_distribution_format_imt_and_format(self):
         g = Graph()
@@ -493,6 +534,53 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
         eq_(resource['format'], u'Turtle')
         eq_(resource['mimetype'], u'text/turtle')
 
+    def test_distribution_dct_format_iana_uri(self):
+        resources = self._build_and_parse_format_mediatype_graph(
+            format_item=URIRef("https://www.iana.org/assignments/media-types/application/json")
+        )
+        # IANA mediatype URI should be added to mimetype field as well
+        assert_true(u'json' in resources[0].get('format').lower())
+        eq_(u'https://www.iana.org/assignments/media-types/application/json',
+            resources[0].get('mimetype'))
+
+    def test_distribution_mediatype_iana_uri_without_format(self):
+        resources = self._build_and_parse_format_mediatype_graph(
+            mediatype_item=URIRef("https://www.iana.org/assignments/media-types/application/json")
+        )
+        # IANA mediatype URI should be added to mimetype field and to format as well
+        eq_(u'https://www.iana.org/assignments/media-types/application/json',
+            resources[0].get('mimetype'))
+        eq_(u'https://www.iana.org/assignments/media-types/application/json',
+            resources[0].get('format'))
+
+    def test_distribution_dct_format_other_uri(self):
+        resources = self._build_and_parse_format_mediatype_graph(
+            format_item=URIRef("https://example.com/my/format")
+        )
+        eq_(u'https://example.com/my/format',
+            resources[0].get('format'))
+        eq_(None, resources[0].get('mimetype'))
+
+    def test_distribution_dct_format_mediatype_text(self):
+        resources = self._build_and_parse_format_mediatype_graph(
+            format_item=Literal("application/json")
+        )
+        # IANA mediatype should be added to mimetype field as well
+        assert_true(u'json' in resources[0].get('format').lower())
+        eq_(u'application/json',
+            resources[0].get('mimetype'))
+
+    def test_distribution_format_and_dcat_mediatype(self):
+        # Even if dct:format is a valid IANA type, prefer dcat:mediaType if given
+        resources = self._build_and_parse_format_mediatype_graph(
+            format_item=Literal("application/json"),
+            mediatype_item=Literal("test-mediatype")
+        )
+        # both should be stored
+        assert_true(u'json' in resources[0].get('format').lower())
+        eq_(u'test-mediatype',
+            resources[0].get('mimetype'))
+
     def test_catalog_xml_rdf(self):
 
         contents = self._get_file_contents('catalog.rdf')
@@ -552,7 +640,8 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
         eq_(dataset['title'], 'U.S. Widget Manufacturing Statistics')
 
         eq_(extras['contact_name'], 'Jane Doe')
-        eq_(extras['contact_email'], 'mailto:jane.doe@agency.gov')
+        # mailto gets removed for storage and is added again on output
+        eq_(extras['contact_email'], 'jane.doe@agency.gov')
         eq_(extras['publisher_name'], 'Widget Services')
         eq_(extras['publisher_email'], 'widget.services@agency.gov')
 
@@ -562,6 +651,35 @@ class TestEuroDCATAPProfileParsing(BaseParseTest):
         eq_(resource['name'], u'widgets.csv')
         eq_(resource['url'], u'https://data.agency.gov/datasets/widgets-statistics/widgets.csv')
         eq_(resource['download_url'], u'https://data.agency.gov/datasets/widgets-statistics/widgets.csv')
+
+    def test_dataset_json_ld_with_at_graph(self):
+
+        contents = self._get_file_contents('catalog_with_at_graph.jsonld')
+
+        p = RDFParser(profiles=['euro_dcat_ap'])
+
+        p.parse(contents, _format='json-ld')
+
+        datasets = [d for d in p.datasets()]
+
+        eq_(len(datasets), 1)
+
+        dataset = datasets[0]
+        extras = dict((e['key'], e['value']) for e in dataset['extras'])
+
+        eq_(dataset['title'], 'Title dataset')
+
+        eq_(extras['contact_name'], 'Jane Doe')
+        # mailto gets removed for storage and is added again on output
+        eq_(extras['contact_email'], 'jane.doe@agency.gov')
+
+        eq_(len(dataset['resources']), 1)
+
+        resource = dataset['resources'][0]
+        eq_(resource['name'], u'download.zip')
+        eq_(resource['url'], u'http://example2.org/files/download.zip')
+        eq_(resource['access_url'], u'https://ckan.example.org/dataset/d4ce4e6e-ab89-44cb-bf5c-33a162c234de/resource/a289c289-55c9-410f-b4c7-f88e5f6f4e47')
+        eq_(resource['download_url'], u'http://example2.org/files/download.zip')
 
     def test_dataset_compatibility_mode(self):
 

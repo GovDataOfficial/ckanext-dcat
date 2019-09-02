@@ -12,6 +12,8 @@ from ckantoolkit.tests import helpers, factories
 from ckanext.dcat.logic import _pagination_info
 from ckanext.dcat.processors import RDFParser
 
+from ckanext.dcat.tests import DCATFunctionalTestBase
+
 eq_ = nose.tools.eq_
 assert_raises = nose.tools.assert_raises
 
@@ -168,9 +170,9 @@ class TestPagination(object):
     @helpers.change_config('ckanext.dcat.datasets_per_page', 10)
     @helpers.change_config('ckan.site_url', 'http://example.com')
     @mock.patch('ckan.plugins.toolkit.request')
-    def test_pagination_keeps_params(self, mock_request):
+    def test_pagination_keeps_only_supported_params(self, mock_request):
 
-        mock_request.params = {'a': 1, 'b': 2}
+        mock_request.params = {'a': 1, 'b': 2, 'modified_since': '2018-03-22', 'profiles': 'schemaorg'}
         mock_request.host_url = 'http://ckan.example.com'
         mock_request.path = '/feed/catalog.xml'
 
@@ -188,10 +190,10 @@ class TestPagination(object):
         eq_(pagination['count'], 12)
         eq_(pagination['items_per_page'],
             config.get('ckanext.dcat.datasets_per_page'))
-        eq_(pagination['current'], 'http://example.com/feed/catalog.xml?a=1&b=2&page=1')
-        eq_(pagination['first'], 'http://example.com/feed/catalog.xml?a=1&b=2&page=1')
-        eq_(pagination['last'], 'http://example.com/feed/catalog.xml?a=1&b=2&page=2')
-        eq_(pagination['next'], 'http://example.com/feed/catalog.xml?a=1&b=2&page=2')
+        eq_(pagination['current'], 'http://example.com/feed/catalog.xml?modified_since=2018-03-22&profiles=schemaorg&page=1')
+        eq_(pagination['first'], 'http://example.com/feed/catalog.xml?modified_since=2018-03-22&profiles=schemaorg&page=1')
+        eq_(pagination['last'], 'http://example.com/feed/catalog.xml?modified_since=2018-03-22&profiles=schemaorg&page=2')
+        eq_(pagination['next'], 'http://example.com/feed/catalog.xml?modified_since=2018-03-22&profiles=schemaorg&page=2')
         assert 'previous' not in pagination
 
     @helpers.change_config('ckanext.dcat.datasets_per_page', 10)
@@ -261,8 +263,8 @@ class TestPagination(object):
                       _pagination_info, query, data_dict)
 
 
-class TestActions(helpers.FunctionalTestBase):
-   def test_dataset_show_with_format(self):
+class TestActions(DCATFunctionalTestBase):
+    def test_dataset_show_with_format(self):
         dataset = factories.Dataset(
             notes='Test dataset'
         )
@@ -283,7 +285,7 @@ class TestActions(helpers.FunctionalTestBase):
         eq_(dcat_dataset['title'], dataset['title'])
         eq_(dcat_dataset['notes'], dataset['notes'])
 
-   def test_dataset_show_without_format(self):
+    def test_dataset_show_without_format(self):
         dataset = factories.Dataset(
             notes='Test dataset'
         )
