@@ -104,11 +104,14 @@ def _search_ckan_datasets(context, data_dict):
         'rows': n,
         'start': n * (page - 1),
         'sort': 'metadata_modified desc',
+        'q': data_dict.get('q', '*:*'),
+        'fq': data_dict.get('fq'),
+        'fq_list': [],
+        'group': 'true',
+        'group.field': 'extras_metadata_original_id',
+        'group.main': 'true',
+        'group.sort': 'metadata_created desc'
     }
-
-    search_data_dict['q'] = data_dict.get('q', '*:*')
-    search_data_dict['fq'] = data_dict.get('fq')
-    search_data_dict['fq_list'] = []
 
     # Exclude certain dataset types
     search_data_dict['fq_list'].append('-dataset_type:harvest')
