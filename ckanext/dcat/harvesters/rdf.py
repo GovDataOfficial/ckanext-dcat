@@ -128,6 +128,18 @@ class DCATRDFHarvester(DCATHarvester):
 
         return object_ids
 
+    def _get_create_package_schema(self, package_type):
+        package_plugin = lib_plugins.lookup_package_plugin(package_type)
+
+        package_schema = package_plugin.create_package_schema()
+        return package_schema
+
+    def _get_update_package_schema(self, package_type):
+        package_plugin = lib_plugins.lookup_package_plugin(package_type)
+
+        package_schema = package_plugin.update_package_schema()
+        return package_schema
+
     def validate_config(self, source_config):
         if not source_config:
             return source_config
@@ -309,6 +321,9 @@ class DCATRDFHarvester(DCATHarvester):
 
         try:
             if existing_dataset:
+                package_schema = self._get_update_package_schema(dataset.get('type', None))
+                context['schema'] = package_schema
+
                 # Don't change the dataset name even if the title has
                 dataset['name'] = existing_dataset['name']
                 dataset['id'] = existing_dataset['id']
@@ -350,9 +365,7 @@ class DCATRDFHarvester(DCATHarvester):
                 log.info('Updated dataset %s' % dataset['name'])
 
             else:
-                package_plugin = lib_plugins.lookup_package_plugin(dataset.get('type', None))
-
-                package_schema = package_plugin.create_package_schema()
+                package_schema = self._get_create_package_schema(dataset.get('type', None))
                 context['schema'] = package_schema
 
                 # We need to explicitly provide a package ID
