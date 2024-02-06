@@ -26,6 +26,12 @@ import ckanext.dcat.harvesters.rdf
 
 
 
+@pytest.fixture
+def clean_db(reset_db, migrate_db_for):
+    reset_db()
+    if p.get_plugin('harvest'):
+        migrate_db_for('harvest')
+
 
 @pytest.fixture
 def clean_queues():
@@ -617,8 +623,8 @@ class FunctionalHarvestTest(object):
         self._fetch_queue(num_objects)
 
 
-@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index', 'clean_queues')
 @pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester')
+@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index', 'clean_queues')
 class TestDCATHarvestFunctional(FunctionalHarvestTest):
 
     def test_harvest_create_rdf(self):
@@ -1107,13 +1113,13 @@ class TestDCATHarvestFunctional(FunctionalHarvestTest):
                                       'example-dataset-1')
 
 
+@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_harvester')
 @pytest.mark.usefixtures(
     'with_plugins',
     'clean_db',
     'clean_index',
     'clean_queues',
 )
-@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_harvester')
 class TestDCATHarvestFunctionalExtensionPoints(FunctionalHarvestTest):
 
     def test_harvest_before_download_extension_point_gets_called(self, reset_calls_counter):
@@ -1535,13 +1541,13 @@ class TestDCATHarvestFunctionalExtensionPoints(FunctionalHarvestTest):
         assert plugin.calls['after_update'] == 2
 
 
+@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_null_harvester')
 @pytest.mark.usefixtures(
     'with_plugins',
     'clean_db',
     'clean_index',
     'clean_queues',
 )
-@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_null_harvester')
 class TestDCATHarvestFunctionalSetNull(FunctionalHarvestTest):
 
     @responses.activate
@@ -1595,13 +1601,13 @@ class TestDCATHarvestFunctionalSetNull(FunctionalHarvestTest):
         assert plugin.calls['after_update'] == 0
 
 
+@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_exception_harvester')
 @pytest.mark.usefixtures(
     'with_plugins',
     'clean_db',
     'clean_index',
     'clean_queues',
 )
-@pytest.mark.ckan_config('ckan.plugins', 'dcat harvest dcat_rdf_harvester test_rdf_exception_harvester')
 class TestDCATHarvestFunctionalRaiseExcpetion(FunctionalHarvestTest):
 
     @responses.activate

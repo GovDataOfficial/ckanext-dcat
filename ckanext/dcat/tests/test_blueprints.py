@@ -30,7 +30,7 @@ def _sort_query_params(url):
          encoded_qs, parts.fragment)
     )
 
-@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index')
+@pytest.mark.usefixtures('clean_index')
 class TestEndpoints():
 
     def _object_value(self, graph, subject, predicate):
@@ -417,7 +417,7 @@ class TestEndpoints():
         assert 'Unknown RDF profiles: nope' in response.body
 
 
-@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index')
+@pytest.mark.usefixtures('clean_index')
 class TestAcceptHeader():
     '''
     ckanext.dcat.enable_content_negotiation is enabled on test.ini
@@ -510,7 +510,7 @@ class TestAcceptHeader():
 
 @pytest.mark.skipif(p.toolkit.check_ckan_version(max_version='2.4.99'),
                     reason='ITranslations not available on CKAN < 2.5')
-@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index')
+@pytest.mark.usefixtures('clean_index')
 class TestTranslations():
 
     def test_labels_default(self, app):
@@ -565,7 +565,7 @@ class TestTranslations():
         assert 'version_notes' in response.body
 
 
-@pytest.mark.usefixtures('with_plugins', 'clean_db', 'clean_index')
+@pytest.mark.usefixtures('clean_index')
 class TestStructuredData():
 
     @pytest.mark.ckan_config('ckan.plugins', 'dcat structured_data')
